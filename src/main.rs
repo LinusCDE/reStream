@@ -9,6 +9,8 @@ use std::default::Default;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 fn main() -> Result<()> {
     let mut streamer = match CURRENT_DEVICE.model {
@@ -40,6 +42,9 @@ fn main() -> Result<()> {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
 
+    let frame_duration: Duration = Duration::from_micros(1000000 / 10 as u64);
+
+    let mut last_frame = SystemTime::now();
     let mut fb_data = vec![0u8; streamer.size];
     loop {
         streamer.read_exact(&mut fb_data)?;
@@ -84,6 +89,12 @@ fn main() -> Result<()> {
 
         stdout.write_all(&bw_data)?;
         stdout.flush()?;
+
+        let elapsed = last_frame.elapsed().unwrap();
+        if frame_duration > elapsed {
+            thread::sleep(frame_duration - elapsed);
+        }
+        last_frame = last_frame.checked_add(frame_duration).unwrap();
     }
 }
 
