@@ -42,7 +42,11 @@ fn main() -> Result<()> {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
 
-    let frame_duration: Duration = Duration::from_micros(1000000 / 10 as u64);
+    // FPS cap is not really needed but can help to spare some cpu.
+    // On my rm1 10 fps are currently using 80% cpu and 100% when drawing (xochitl).
+    // There are probably a some things that could be done to speed this up further.
+    const FPS: u64 = 10;
+    let frame_duration: Duration = Duration::from_micros(1000000 / FPS as u64);
 
     let mut last_frame = SystemTime::now();
     let mut fb_data = vec![0u8; streamer.size];
@@ -50,6 +54,10 @@ fn main() -> Result<()> {
         streamer.read_exact(&mut fb_data)?;
         let mut bw_data = vec![0u8; streamer.size / 16];
 
+        // Still a poc. Basicially convert every 16 bytes into
+        // one byte of just 8 black and white pixels (2 bytes each are pixel on the rm1).
+        // Using pointers gives some signifiant perf improment since no bounds checking
+        // is done. I'm not aware of a faster better solution rn and it's just a poc anyway.
         unsafe {
             let mut fb_data_ptr = fb_data.as_ptr();
             let mut bw_data_ptr = bw_data.as_mut_ptr();
