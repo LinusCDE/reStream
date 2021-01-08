@@ -95,7 +95,7 @@ case "$rm_version" in
     "reMarkable 1.0")
         width=1408
         height=1872
-        pixel_format="rgb565le"
+        pixel_format="monow"
         ;;
     "reMarkable 2.0")
         pixel_format="gray8"
@@ -112,7 +112,7 @@ esac
 
 # technical parameters
 loglevel="info"
-decompress="lz4 -d"
+decompress="cat"
 
 # check if lz4 is present on the host
 if ! lz4 -V >/dev/null; then

@@ -2,22 +2,22 @@
 extern crate anyhow;
 
 use anyhow::{Context, Result};
-use libremarkable::device::{CURRENT_DEVICE, Model};
+use libremarkable::device::{Model, CURRENT_DEVICE};
 use lz_fear::CompressionSettings;
 
 use std::default::Default;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::process::Command;
 
 fn main() -> Result<()> {
-    let streamer = match CURRENT_DEVICE.model {
+    let mut streamer = match CURRENT_DEVICE.model {
         Model::Gen1 => {
             let width = 1408;
             let height = 1872;
             let bytes_per_pixel = 2;
             ReStreamer::init("/dev/fb0", 0, width, height, bytes_per_pixel)?
-        },
+        }
         Model::Gen2 => {
             let width = 1404;
             let height = 1872;
@@ -27,13 +27,64 @@ fn main() -> Result<()> {
             let offset = rm2_fb_offset(pid)?;
             let mem = format!("/proc/{}/mem", pid);
             ReStreamer::init(&mem, offset, width, height, bytes_per_pixel)?
-        },
-        Model::Unknown => unreachable!()
+        }
+        Model::Unknown => unreachable!(),
     };
 
+    /*
     let lz4: CompressionSettings = Default::default();
     lz4.compress(streamer, std::io::stdout().lock())
         .context("Error while compressing framebuffer stream")
+    */
+
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+
+    let mut fb_data = vec![0u8; streamer.size];
+    loop {
+        streamer.read_exact(&mut fb_data)?;
+        let mut bw_data = vec![0u8; streamer.size / 16];
+
+        unsafe {
+            let mut fb_data_ptr = fb_data.as_ptr();
+            let mut bw_data_ptr = bw_data.as_mut_ptr();
+
+            let mut i = 0;
+            while i < streamer.size {
+                let pix1 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix2 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix3 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix4 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix5 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix6 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix7 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix8 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+
+                *bw_data_ptr = ((pix1 as u8) << 7)
+                    | ((pix2 as u8) << 6)
+                    | ((pix3 as u8) << 5)
+                    | ((pix4 as u8) << 4)
+                    | ((pix5 as u8) << 3)
+                    | ((pix6 as u8) << 2)
+                    | ((pix7 as u8) << 1)
+                    | ((pix8 as u8) << 0);
+                bw_data_ptr = bw_data_ptr.add(1);
+
+                i += 16;
+            }
+        }
+
+        stdout.write_all(&bw_data)?;
+        stdout.flush()?;
+    }
 }
 
 fn xochitl_pid() -> Result<usize> {
