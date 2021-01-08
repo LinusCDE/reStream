@@ -10,6 +10,7 @@ use std::default::Default;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 #[derive(Clap)]
 #[clap(version = crate_version!(), author = crate_authors!())]
@@ -21,6 +22,13 @@ pub struct Opts {
         about = "Establish a new unsecure connection to send the data to which reduces some load on the reMarkable and improves fps."
     )]
     connect: Option<String>,
+
+    #[clap(
+        long,
+        short = 'f',
+        about = "Limit framerate to the given one. Reduces bandwidth and prevents capping out the cpu all the time."
+    )]
+    fps_cap: Option<f32>,
 }
 
 fn main() -> Result<()> {
@@ -31,7 +39,7 @@ fn main() -> Result<()> {
         let width = 1408;
         let height = 1872;
         let bytes_per_pixel = 2;
-        ReStreamer::init("/dev/fb0", 0, width, height, bytes_per_pixel)?
+        ReStreamer::init("/dev/fb0", 0, width, height, bytes_per_pixel, opts.fps_cap)?
     } else if version == "reMarkable 2.0\n" {
         let width = 1404;
         let height = 1872;
@@ -40,7 +48,7 @@ fn main() -> Result<()> {
         let pid = xochitl_pid()?;
         let offset = rm2_fb_offset(pid)?;
         let mem = format!("/proc/{}/mem", pid);
-        ReStreamer::init(&mem, offset, width, height, bytes_per_pixel)?
+        ReStreamer::init(&mem, offset, width, height, bytes_per_pixel, opts.fps_cap)?
     } else {
         Err(anyhow!(
             "Unknown reMarkable version: {}\nPlease open a feature request to support your device.",
@@ -106,11 +114,53 @@ fn rm2_fb_offset(pid: usize) -> Result<usize> {
     Ok(address + 8)
 }
 
+pub struct FrameCapper {
+    last_frame: SystemTime,
+    frame_duration: Duration,
+    missed_frames: u32,
+}
+
+impl FrameCapper {
+    pub fn new(fps_cap: f32) -> Self {
+        Self {
+            last_frame: SystemTime::now(),
+            frame_duration: Duration::from_micros((1000000.0 / fps_cap) as u64),
+            missed_frames: 0,
+        }
+    }
+
+    pub fn sync_framerate(&mut self) -> Result<()> {
+        // Delay until next frame should occur
+        let elapsed = self.last_frame.elapsed().unwrap();
+        if self.frame_duration > elapsed {
+            std::thread::sleep(self.frame_duration - elapsed);
+            self.missed_frames = (self.missed_frames as i32 - 1).max(0) as u32;
+        } else {
+            self.missed_frames += 1;
+        }
+
+        // Allow more frames in a small time window to catch up (1s here).
+        // After that window the missed frames are forgotten to restore a
+        // resonable framerate again.
+        if self.missed_frames * self.frame_duration > Duration::from_secs(1) {
+            self.last_frame = SystemTime::now();
+        } else {
+            self.last_frame = self
+                .last_frame
+                .checked_add(self.frame_duration)
+                .context("Error calculating next frame time")?;
+        }
+
+        Ok(())
+    }
+}
+
 pub struct ReStreamer {
     file: File,
     start: u64,
     cursor: usize,
     size: usize,
+    framecapper: Option<FrameCapper>,
 }
 
 impl ReStreamer {
@@ -120,16 +170,19 @@ impl ReStreamer {
         width: usize,
         height: usize,
         bytes_per_pixel: usize,
+        fps_cap: Option<f32>,
     ) -> Result<ReStreamer> {
         let start = offset as u64;
         let size = width * height * bytes_per_pixel;
         let cursor = 0;
         let file = File::open(path)?;
+        let framecapper = fps_cap.map(|fps_cap| FrameCapper::new(fps_cap));
         let mut streamer = ReStreamer {
             file,
             start: start,
             cursor,
             size,
+            framecapper,
         };
         streamer.next_frame()?;
         Ok(streamer)
@@ -138,6 +191,9 @@ impl ReStreamer {
     pub fn next_frame(&mut self) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(self.start))?;
         self.cursor = 0;
+        if let Some(ref mut framecapper) = self.framecapper {
+            framecapper.sync_framerate().ok();
+        }
         Ok(())
     }
 }

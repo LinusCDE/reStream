@@ -10,6 +10,7 @@ measure_throughput=false   # measure how fast data is being transferred
 window_title=reStream      # stream window title is reStream
 video_filters=""           # list of ffmpeg filters to apply
 unsecure_connection=false  # Establish a unsecure connection that is faster
+fps_cap=0                  # Limit the fps (0 = no limit in this script)
 
 # loop through arguments and process them
 while [ $# -gt 0 ]; do
@@ -67,8 +68,13 @@ while [ $# -gt 0 ]; do
             unsecure_connection=true
             shift
             ;;
+        -c | --fps-cap)
+            fps_cap="$2"
+            shift
+            shift
+            ;;
         -h | --help | *)
-            echo "Usage: $0 [-p] [-u] [-s <source>] [-o <output>] [-f <format>] [-t <title>]"
+            echo "Usage: $0 [-p] [-u] [-s <source>] [-o <output>] [-f <format>] [-t <title>] [-c fps_cap]"
             echo "Examples:"
             echo "	$0                              # live view in landscape"
             echo "	$0 -p                           # live view in portrait"
@@ -77,6 +83,7 @@ while [ $# -gt 0 ]; do
             echo "	$0 -o udp://dest:1234 -f mpegts # record to a stream"
             echo "  $0 -w                           # write to a webcam (yuv420p + resize)"
             echo "  $0 -u                           # establish a unsecure but faster connection"
+            echo "  $0 -c                           # Limit the fps to the given amount"
             exit 1
             ;;
     esac
@@ -185,16 +192,23 @@ fi
 
 set -e # stop if an error occurs
 
-receive_cmd="ssh_cmd ./restream"
-#echo './restream --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"'
-#receive_cmd="ssh_cmd 'echo ABC $(echo $SSH_CLIENT | cut -d " " -f1):61819' & ; nc -l -p 61819"
+# Cli options for restream
+restream_opts=""
+if [ $fps_cap -gt 0 ]; then
+  restream_opts="$restream_opts --fps-cap $fps_cap"
+  echo hi
+fi
+
+receive_cmd="ssh_cmd ./restream $restream_opts"
 
 if $unsecure_connection; then
   echo "Spawning unsecure connection"
-  ssh_cmd 'sleep 0.25 && ./restream --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"' &
+  restream_opts="$restream_opts"' --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"'
+  ssh_cmd "sleep 0.25 && ./restream $restream_opts" &
   receive_cmd="nc -l -p 61819"
 fi
 
+echo "CMD: $receive_cmd"
 # shellcheck disable=SC2086
 $receive_cmd \
     | $decompress \
