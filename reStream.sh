@@ -11,6 +11,7 @@ window_title=reStream      # stream window title is reStream
 video_filters=""           # list of ffmpeg filters to apply
 unsecure_connection=false  # Establish a unsecure connection that is faster
 fps_cap=0                  # Limit the fps (0 = no limit in this script)
+black_and_white=0          # Make restream convert the framebuffer to monow (b/w only)
 
 # loop through arguments and process them
 while [ $# -gt 0 ]; do
@@ -73,8 +74,12 @@ while [ $# -gt 0 ]; do
             shift
             shift
             ;;
+        -1 | --black-and-white)
+            black_and_white=true
+            shift
+            ;;
         -h | --help | *)
-            echo "Usage: $0 [-p] [-u] [-s <source>] [-o <output>] [-f <format>] [-t <title>] [-c fps_cap]"
+            echo "Usage: $0 [-p] [-u] [-1] [-s <source>] [-o <output>] [-f <format>] [-t <title>] [-c fps_cap]"
             echo "Examples:"
             echo "	$0                              # live view in landscape"
             echo "	$0 -p                           # live view in portrait"
@@ -84,6 +89,7 @@ while [ $# -gt 0 ]; do
             echo "  $0 -w                           # write to a webcam (yuv420p + resize)"
             echo "  $0 -u                           # establish a unsecure but faster connection"
             echo "  $0 -c                           # Limit the fps to the given amount"
+            echo "  $0 -1                           # 1 bit mode. Everything other than notebooks will look bad."
             exit 1
             ;;
     esac
@@ -122,6 +128,11 @@ case "$rm_version" in
         exit 1
         ;;
 esac
+
+# overwrite pixel_format to monow since restream will do automatic transcoding
+if $black_and_white; then
+    pixel_format="monow"
+fi
 
 # technical parameters
 loglevel="info"
@@ -196,7 +207,10 @@ set -e # stop if an error occurs
 restream_opts=""
 if [ $fps_cap -gt 0 ]; then
   restream_opts="$restream_opts --fps-cap $fps_cap"
-  echo hi
+fi
+
+if $black_and_white; then
+  restream_opts="$restream_opts --monow"
 fi
 
 receive_cmd="ssh_cmd ./restream $restream_opts"

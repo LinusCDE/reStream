@@ -29,17 +29,36 @@ pub struct Opts {
         about = "Limit framerate to the given one. Reduces bandwidth and prevents capping out the cpu all the time."
     )]
     fps_cap: Option<f32>,
+
+    #[clap(
+        long,
+        short = 'm',
+        about = "Always transcode the framebuffer to monow (instead streaming the native pix_fmt)"
+    )]
+    monow: bool,
 }
 
 fn main() -> Result<()> {
     let ref opts: Opts = Opts::parse();
 
     let version = remarkable_version()?;
-    let streamer = if version == "reMarkable 1.0\n" {
+    let streamer: Box<dyn Read> = if version == "reMarkable 1.0\n" {
         let width = 1408;
         let height = 1872;
         let bytes_per_pixel = 2;
-        ReStreamer::init("/dev/fb0", 0, width, height, bytes_per_pixel, opts.fps_cap)?
+
+        let restreamer =
+            ReStreamer::init("/dev/fb0", 0, width, height, bytes_per_pixel, opts.fps_cap)?;
+        if opts.monow {
+            Box::new(MonowTranscoder::new(
+                width,
+                height,
+                bytes_per_pixel,
+                restreamer,
+            )?)
+        } else {
+            Box::new(restreamer)
+        }
     } else if version == "reMarkable 2.0\n" {
         let width = 1404;
         let height = 1872;
@@ -48,7 +67,19 @@ fn main() -> Result<()> {
         let pid = xochitl_pid()?;
         let offset = rm2_fb_offset(pid)?;
         let mem = format!("/proc/{}/mem", pid);
-        ReStreamer::init(&mem, offset, width, height, bytes_per_pixel, opts.fps_cap)?
+
+        let restreamer =
+            ReStreamer::init(&mem, offset, width, height, bytes_per_pixel, opts.fps_cap)?;
+        if opts.monow {
+            Box::new(MonowTranscoder::new(
+                width,
+                height,
+                bytes_per_pixel,
+                restreamer,
+            )?)
+        } else {
+            Box::new(restreamer)
+        }
     } else {
         Err(anyhow!(
             "Unknown reMarkable version: {}\nPlease open a feature request to support your device.",
@@ -58,7 +89,6 @@ fn main() -> Result<()> {
 
     let stdout = std::io::stdout();
     let data_target: Box<dyn Write> = if let Some(ref address) = opts.connect {
-        eprintln!("[rM] Sending stream to {} (instead of stdout)", address);
         let conn = std::net::TcpStream::connect(address)?;
         conn.set_write_timeout(Some(std::time::Duration::from_secs(3)))?;
         Box::new(conn)
@@ -66,7 +96,12 @@ fn main() -> Result<()> {
         Box::new(stdout.lock())
     };
 
-    let lz4: CompressionSettings = Default::default();
+    let mut lz4: CompressionSettings = CompressionSettings::default();
+    if opts.monow {
+        // The default block size will make the monow transcoding seem extremly
+        // laggy since the frames a lot smaller and better compressable.
+        lz4.block_size(64 * 1024);
+    }
     lz4.compress(streamer, data_target)
         .context("Error while compressing framebuffer stream")
 }
@@ -212,5 +247,159 @@ impl Read for ReStreamer {
             self.next_frame()?;
         }
         Ok(bytes_read)
+    }
+}
+
+struct MonowTranscoder<R> {
+    inner: R,
+    bytes_per_pixel: usize,
+    native_size: usize,
+    monow_data: Option<std::io::Cursor<Vec<u8>>>,
+}
+
+impl<R: Read> MonowTranscoder<R> {
+    pub fn new(width: usize, height: usize, bytes_per_pixel: usize, inner: R) -> Result<Self> {
+        let monow_size = (width * height) / 8;
+        let mut instance = Self {
+            inner,
+            native_size: width * height * bytes_per_pixel,
+            bytes_per_pixel,
+            monow_data: Some(std::io::Cursor::new(vec![0u8; monow_size])),
+        };
+        instance.refill_bw_data()?;
+        Ok(instance)
+    }
+
+    fn refill_bw_data(&mut self) -> Result<()> {
+        match self.bytes_per_pixel {
+            1 => self.refill_bw_data_1byte_per_pixel(),
+            2 => self.refill_bw_data_2bytes_per_pixel(),
+            _ => Err(anyhow!("Unsupported bytes_per_pixel value!")),
+        }
+    }
+
+    /// Using a lot of unsafe to improve performance (probably not best but works).
+    fn refill_bw_data_2bytes_per_pixel(&mut self) -> Result<()> {
+        let mut fb_data = vec![0u8; self.native_size];
+        self.inner.read_exact(&mut fb_data)?;
+
+        let mut monow_data_vec: Vec<u8> = self
+            .monow_data
+            .take()
+            .ok_or(anyhow!("monow_data is empty!"))?
+            .into_inner();
+
+        // Still a poc. Basicially convert every 16 bytes into
+        // one byte of just 8 black and white pixels (2 bytes each are pixel on the rm1).
+        // Using pointers gives some signifiant perf improment since no bounds checking
+        // is done. I'm not aware of a faster better solution rn and it's just a poc anyway.
+        unsafe {
+            let mut fb_data_ptr = fb_data.as_ptr();
+            let mut bw_data_ptr = monow_data_vec.as_mut_ptr();
+
+            let mut i = 0;
+            while i < self.native_size {
+                let pix1 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix2 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix3 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix4 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix5 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix6 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix7 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+                let pix8 = *fb_data_ptr == 0 && *fb_data_ptr.add(1) == 0;
+                fb_data_ptr = fb_data_ptr.add(2);
+
+                *bw_data_ptr = ((pix1 as u8) << 7)
+                    | ((pix2 as u8) << 6)
+                    | ((pix3 as u8) << 5)
+                    | ((pix4 as u8) << 4)
+                    | ((pix5 as u8) << 3)
+                    | ((pix6 as u8) << 2)
+                    | ((pix7 as u8) << 1)
+                    | ((pix8 as u8) << 0);
+                bw_data_ptr = bw_data_ptr.add(1);
+
+                i += 16;
+            }
+        }
+
+        self.monow_data = Some(std::io::Cursor::new(monow_data_vec));
+        Ok(())
+    }
+
+    /// Using a lot of unsafe to improve performance (probably not best but works).
+    fn refill_bw_data_1byte_per_pixel(&mut self) -> Result<()> {
+        let mut fb_data = vec![0u8; self.native_size];
+        self.inner.read_exact(&mut fb_data)?;
+
+        let mut monow_data_vec: Vec<u8> = self
+            .monow_data
+            .take()
+            .ok_or(anyhow!("monow_data is empty!"))?
+            .into_inner();
+
+        // Still a poc. Basicially convert every 8 bytes into
+        // one byte of just 8 black and white pixels (8 bytes each are pixel on the rm2, I guess).
+        // Using pointers gives some signifiant perf improment since no bounds checking
+        // is done. I'm not aware of a faster better solution rn and it's just a poc anyway.
+        unsafe {
+            let mut fb_data_ptr = fb_data.as_ptr();
+            let mut bw_data_ptr = monow_data_vec.as_mut_ptr();
+
+            let mut i = 0;
+            while i < self.native_size {
+                let pixels = (
+                    *fb_data_ptr.add(0) == 0,
+                    *fb_data_ptr.add(1) == 0,
+                    *fb_data_ptr.add(2) == 0,
+                    *fb_data_ptr.add(3) == 0,
+                    *fb_data_ptr.add(4) == 0,
+                    *fb_data_ptr.add(5) == 0,
+                    *fb_data_ptr.add(6) == 0,
+                    *fb_data_ptr.add(7) == 0,
+                );
+                fb_data_ptr = fb_data_ptr.add(8);
+
+                *bw_data_ptr = ((pixels.0 as u8) << 7)
+                    | ((pixels.1 as u8) << 6)
+                    | ((pixels.2 as u8) << 5)
+                    | ((pixels.3 as u8) << 4)
+                    | ((pixels.4 as u8) << 3)
+                    | ((pixels.5 as u8) << 2)
+                    | ((pixels.6 as u8) << 1)
+                    | ((pixels.7 as u8) << 0);
+                bw_data_ptr = bw_data_ptr.add(1);
+
+                i += 8;
+            }
+        }
+
+        self.monow_data = Some(std::io::Cursor::new(monow_data_vec));
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for MonowTranscoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(ref mut monow_data) = self.monow_data {
+            let bytes_read = monow_data.read(buf)?;
+            if bytes_read < buf.len() {
+                if let Err(e) = self.refill_bw_data() {
+                    eprintln!("Err while refilling cached monow_data: {}", e);
+                    return Err(std::io::Error::from(std::io::ErrorKind::Other));
+                }
+            }
+
+            Ok(bytes_read)
+        } else {
+            Err(std::io::Error::from(std::io::ErrorKind::Other))
+        }
     }
 }
