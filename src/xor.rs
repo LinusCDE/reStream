@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io::Read;
 use std::io::Result;
 
@@ -43,16 +42,17 @@ impl<R: Read> Read for XorStream<R> {
 /// It starts with the same assumed block of 0s.
 pub struct UnxorStream<R> {
     inner: R,
-    diff_cache: VecDeque<u8>,
+    diff_cache: Vec<u8>,
+    diff_cache_index: usize,
 }
 
 impl<R> UnxorStream<R> {
     pub fn new(block_size: usize, inner: R) -> Self {
-        let mut diff_cache = VecDeque::with_capacity(block_size);
-        for _ in 0..block_size {
-            diff_cache.push_back(0u8);
+        Self {
+            inner,
+            diff_cache: vec![0u8; block_size],
+            diff_cache_index: 0,
         }
-        Self { inner, diff_cache }
     }
 }
 
@@ -60,8 +60,10 @@ impl<R: Read> Read for UnxorStream<R> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let bytes_read = self.inner.read(buf)?;
         for i in 0..bytes_read {
-            buf[i] = (self.diff_cache.pop_front().unwrap()) ^ buf[i];
-            self.diff_cache.push_back(buf[i]);
+            buf[i] = self.diff_cache[0] ^ buf[i];
+            self.diff_cache[i] = buf[i];
+
+            self.diff_cache_index = (self.diff_cache_index + 1) % self.diff_cache_index;
         }
         Ok(bytes_read)
     }
