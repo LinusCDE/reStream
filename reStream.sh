@@ -124,7 +124,7 @@ case "$rm_version" in
 esac
 
 # technical parameters
-loglevel="warning"
+loglevel="info"
 decompress="lz4 -d"
 
 # check if lz4 is present on the host
@@ -192,15 +192,17 @@ fi
 
 set -e # stop if an error occurs
 
-receive_cmd="ssh_cmd ./restream"
-#echo './restream --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"'
-#receive_cmd="ssh_cmd 'echo ABC $(echo $SSH_CLIENT | cut -d " " -f1):61819' & ; nc -l -p 61819"
-
 # Tell restream to use xor if selected by user
 restream_opts=""
+unxor_passthrough="cat"
 if $xor; then
   restream_opts="$restream_opts --xor"
+  #unxor="target/release/unxor"
+  unxor_passthrough="./unxor $frame_size"
+  # TODO: Use .exe for windows?
 fi
+
+receive_cmd="ssh_cmd ./restream $restream_opts"
 
 if $unsecure_connection; then
   echo "Spawning unsecure connection"
@@ -208,14 +210,10 @@ if $unsecure_connection; then
   receive_cmd="nc -l -p 61819"
 fi
 
-#unxor="target/release/unxor"
-unxor="./unxor"
-# TODO: Use .exe for windows?
-
 # shellcheck disable=SC2086
 $receive_cmd \
-    | pv \
     | $decompress \
+    | $unxor_passthrough \
     | $host_passthrough \
     | "$output_cmd" \
         -vcodec rawvideo \
