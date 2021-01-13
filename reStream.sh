@@ -10,6 +10,7 @@ measure_throughput=false   # measure how fast data is being transferred
 window_title=reStream      # stream window title is reStream
 video_filters=""           # list of ffmpeg filters to apply
 unsecure_connection=false  # Establish a unsecure connection that is faster
+xor=false                  # Use xor compression to make lz4 compression more effective
 
 # loop through arguments and process them
 while [ $# -gt 0 ]; do
@@ -40,7 +41,6 @@ while [ $# -gt 0 ]; do
         -w | --webcam)
             webcam=true
             format="v4l2"
-
             # check if there is a modprobed v4l2 loopback device
             # use the first cam as default if there is no output_path already
             cam_path=$(v4l2-ctl --list-devices \
@@ -67,8 +67,12 @@ while [ $# -gt 0 ]; do
             unsecure_connection=true
             shift
             ;;
+        -x | --xor)
+            xor=true
+            shift
+            ;;
         -h | --help | *)
-            echo "Usage: $0 [-p] [-u] [-s <source>] [-o <output>] [-f <format>] [-t <title>]"
+            echo "Usage: $0 [-p] [-u] [-x] [-s <source>] [-o <output>] [-f <format>] [-t <title>]"
             echo "Examples:"
             echo "	$0                              # live view in landscape"
             echo "	$0 -p                           # live view in portrait"
@@ -77,6 +81,7 @@ while [ $# -gt 0 ]; do
             echo "	$0 -o udp://dest:1234 -f mpegts # record to a stream"
             echo "  $0 -w                           # write to a webcam (yuv420p + resize)"
             echo "  $0 -u                           # establish a unsecure but faster connection"
+            echo "  $0 -x                           # xor frames to increase effectiveness of compression"
             exit 1
             ;;
     esac
@@ -102,11 +107,13 @@ case "$rm_version" in
         width=1408
         height=1872
         pixel_format="rgb565le"
+        frame_size=$((width * height * 2))
         ;;
     "reMarkable 2.0")
         pixel_format="gray8"
         width=1872
         height=1404
+        frame_size=$((width * height * 1))
         video_filters="$video_filters,transpose=2"
         ;;
     *)
@@ -117,7 +124,7 @@ case "$rm_version" in
 esac
 
 # technical parameters
-loglevel="info"
+loglevel="warning"
 decompress="lz4 -d"
 
 # check if lz4 is present on the host
@@ -189,14 +196,25 @@ receive_cmd="ssh_cmd ./restream"
 #echo './restream --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"'
 #receive_cmd="ssh_cmd 'echo ABC $(echo $SSH_CLIENT | cut -d " " -f1):61819' & ; nc -l -p 61819"
 
+# Tell restream to use xor if selected by user
+restream_opts=""
+if $xor; then
+  restream_opts="$restream_opts --xor"
+fi
+
 if $unsecure_connection; then
   echo "Spawning unsecure connection"
-  ssh_cmd 'sleep 0.25 && ./restream --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"' &
+  ssh_cmd 'sleep 0.25 && ./restream '"$restream_opts"' --connect "$(echo $SSH_CLIENT | cut -d " " -f1):61819"' &
   receive_cmd="nc -l -p 61819"
 fi
 
+#unxor="target/release/unxor"
+unxor="./unxor"
+# TODO: Use .exe for windows?
+
 # shellcheck disable=SC2086
 $receive_cmd \
+    | pv \
     | $decompress \
     | $host_passthrough \
     | "$output_cmd" \

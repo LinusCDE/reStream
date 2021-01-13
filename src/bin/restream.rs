@@ -1,3 +1,6 @@
+//! restream fetches and compresses the framebuffer on the reMarkable for the PC
+//! It is supposed to be compiled for armv7 to run on the reMarkable.
+
 #[macro_use]
 extern crate anyhow;
 extern crate lz_fear;
@@ -11,6 +14,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::process::Command;
 
+use restream::xor::XorStream; // restream her refers to the lib part. Possible includes are in lib.rs.
+
 #[derive(Clap)]
 #[clap(version = crate_version!(), author = crate_authors!())]
 pub struct Opts {
@@ -21,6 +26,9 @@ pub struct Opts {
         about = "Establish a new unsecure connection to send the data to which reduces some load on the reMarkable and improves fps."
     )]
     connect: Option<String>,
+
+    #[clap(long, short, about = "Use xoring to improve the compression ratio.")]
+    xor: bool,
 }
 
 fn main() -> Result<()> {
@@ -58,9 +66,16 @@ fn main() -> Result<()> {
         Box::new(stdout.lock())
     };
 
-    let lz4: CompressionSettings = Default::default();
-    lz4.compress(streamer, data_target)
-        .context("Error while compressing framebuffer stream")
+    if opts.xor {
+        let mut lz4: CompressionSettings = Default::default();
+        lz4.block_size(1024 * 64);
+        lz4.compress(XorStream::new(streamer.size, streamer), data_target)
+            .context("Error while compressing framebuffer stream")
+    } else {
+        let lz4: CompressionSettings = Default::default();
+        lz4.compress(streamer, data_target)
+            .context("Error while compressing framebuffer stream")
+    }
 }
 
 fn remarkable_version() -> Result<String> {

@@ -9,6 +9,6 @@ rustflags = [
   "-C", "link-arg=--sysroot=/usr/local/oecore-x86_64/sysroots/cortexa9hf-neon-oe-linux-gnueabi",
 ]
 
-[build]
-# Set the default --target flag
-target = "armv7-unknown-linux-gnueabihf"
+#[build]
+## Set the default --target flag
+#target = "armv7-unknown-linux-gnueabihf"
